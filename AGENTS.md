@@ -38,13 +38,32 @@ directly. Treat that as the primary project constraint.
 6. If UI behavior changed, launch the generated EXE and smoke test the affected
    path.
 
+## GUI Smoke-Test Notes
+
+- Prefer a direct Win32 smoke test over UI Automation patterns for this app.
+  In the current agent environment, the raw Win32 `Button` and `Edit` controls
+  may appear to UI Automation as `ControlType.Pane` and may expose no
+  `InvokePattern`.
+- A reliable smoke-test shape is:
+  - launch `build\Win32Calculator.exe`;
+  - find the top-level calculator window by process id;
+  - get child controls with `GetDlgItem`;
+  - send `BM_CLICK` to button HWNDs;
+  - read the display by sending `WM_GETTEXT` to control id `100`.
+- Do not use cross-process `GetWindowTextW` as the final display assertion for
+  the edit control. During testing it returned the initial text even when the
+  edit had updated; `WM_GETTEXT` returned the actual displayed value.
+- Control ids are stable: display `100`, buttons start at `200`, so `9` is
+  `206`, `*` is `202`, and `=` is `211`.
+- Always close or kill the launched calculator process after smoke testing.
+
 ## Current Baseline
 
 - Target: PE32 x86 Windows GUI executable.
 - Image base: `0x00400000`.
 - Single section: `.text`.
 - Imports: `kernel32.dll`, `user32.dll`, `gdi32.dll`.
-- Known smoke test: invoke `7 + 8 =`; display should read `15`.
+- Known smoke test: invoke `9 * 9 =`; display should read `81`.
 
 Keep future changes conservative and explicit. This project values a transparent
 manual build process over generality.

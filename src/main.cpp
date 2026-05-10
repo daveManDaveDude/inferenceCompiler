@@ -2,6 +2,7 @@
 #define _UNICODE
 
 #include <windows.h>
+#include <float.h>
 
 namespace {
 
@@ -10,15 +11,20 @@ constexpr int ButtonBaseId = 200;
 constexpr int WindowWidth = 290;
 constexpr int WindowHeight = 390;
 constexpr int DisplayChars = 128;
-constexpr int Scale = 10000;
-constexpr int MaxValue = 2147483647;
-constexpr int MinValue = -2147483647 - 1;
+constexpr int DisplaySignificantDigits = 12;
+constexpr int ScientificLargeExponent = 12;
+constexpr int ScientificSmallExponent = -5;
 
 HWND g_display = nullptr;
+HFONT g_displayFont = nullptr;
 wchar_t g_current[DisplayChars] = L"0";
-int g_stored = 0;
+double g_stored = 0;
 wchar_t g_pendingOp = 0;
+double g_lastOperand = 0;
+wchar_t g_lastOp = 0;
 bool g_startNewNumber = true;
+bool g_hasLastOperation = false;
+bool g_error = false;
 
 bool IsDigit(wchar_t ch) {
     return ch >= L'0' && ch <= L'9';
@@ -41,37 +47,35 @@ void CopyText(const wchar_t* text) {
 }
 
 void UpdateDisplay() {
-    SetWindowTextW(g_display, g_current);
+    if (g_display) {
+        SetWindowTextW(g_display, g_current);
+    }
 }
 
-int ClampValue(long long value) {
-    if (value > MaxValue) {
-        return MaxValue;
-    }
-    if (value < MinValue) {
-        return MinValue;
-    }
-    return static_cast<int>(value);
+void SetError() {
+    CopyText(L"ERROR");
+    g_stored = 0;
+    g_pendingOp = 0;
+    g_lastOperand = 0;
+    g_lastOp = 0;
+    g_startNewNumber = true;
+    g_hasLastOperation = false;
+    g_error = true;
+    UpdateDisplay();
 }
 
-int AddScaledDigit(int value, int digit, int place) {
-    const int addend = digit * place;
-    if (value > (MaxValue - addend) / 10 && place == Scale) {
-        return MaxValue;
-    }
-    if (place == Scale) {
-        return value * 10 + addend;
-    }
-    if (value > MaxValue - addend) {
-        return MaxValue;
-    }
-    return value + addend;
+bool IsFiniteValue(double value) {
+    return value <= DBL_MAX && value >= -DBL_MAX;
 }
 
-int CurrentValue() {
+double AbsValue(double value) {
+    return value < 0 ? -value : value;
+}
+
+bool TryCurrentValue(double& result) {
     const wchar_t* cursor = g_current;
     bool negative = false;
-    int value = 0;
+    double value = 0;
     bool sawDigit = false;
 
     if (*cursor == L'-') {
@@ -80,26 +84,35 @@ int CurrentValue() {
     }
 
     while (IsDigit(*cursor)) {
-        value = AddScaledDigit(value, static_cast<int>(*cursor - L'0'), Scale);
+        const int digit = static_cast<int>(*cursor - L'0');
+        if (value > (DBL_MAX - digit) / 10) {
+            return false;
+        }
+        value = (value * 10) + digit;
         sawDigit = true;
         ++cursor;
     }
 
     if (*cursor == L'.') {
         ++cursor;
-        int place = Scale / 10;
-        while (IsDigit(*cursor) && place > 0) {
-            value = AddScaledDigit(value, static_cast<int>(*cursor - L'0'), place);
+        double place = 0.1;
+        while (IsDigit(*cursor)) {
+            value += static_cast<int>(*cursor - L'0') * place;
             sawDigit = true;
-            place /= 10;
+            place *= 0.1;
             ++cursor;
         }
     }
 
     if (!sawDigit) {
-        return 0;
+        return false;
     }
-    return negative ? -value : value;
+
+    result = negative ? -value : value;
+    if (!IsFiniteValue(result)) {
+        return false;
+    }
+    return true;
 }
 
 void TrimFractionZeros() {
@@ -113,31 +126,157 @@ void TrimFractionZeros() {
     }
 }
 
-void FormatNumber(int value) {
-    if (value == MinValue) {
-        CopyText(L"Overflow");
+void AppendChar(wchar_t* text, int& pos, wchar_t ch) {
+    if (pos < DisplayChars - 1) {
+        text[pos] = ch;
+        ++pos;
+        text[pos] = 0;
+    }
+}
+
+void AppendDigits(wchar_t* text, int& pos, const int* digits, int first, int last) {
+    for (int i = first; i < last; ++i) {
+        AppendChar(text, pos, static_cast<wchar_t>(L'0' + digits[i]));
+    }
+}
+
+void AppendUnsignedInt(wchar_t* text, int& pos, int value) {
+    wchar_t temp[16];
+    int count = 0;
+
+    do {
+        temp[count] = static_cast<wchar_t>(L'0' + (value % 10));
+        value /= 10;
+        ++count;
+    } while (value > 0 && count < 16);
+
+    while (count > 0) {
+        --count;
+        AppendChar(text, pos, temp[count]);
+    }
+}
+
+void FormatScientific(bool negative, const int* digits, int digitCount, int exponent) {
+    int pos = 0;
+    g_current[0] = 0;
+
+    if (negative) {
+        AppendChar(g_current, pos, L'-');
+    }
+    AppendChar(g_current, pos, static_cast<wchar_t>(L'0' + digits[0]));
+    if (digitCount > 1) {
+        AppendChar(g_current, pos, L'.');
+        AppendDigits(g_current, pos, digits, 1, digitCount);
+    }
+    AppendChar(g_current, pos, L'e');
+    AppendChar(g_current, pos, exponent < 0 ? L'-' : L'+');
+    AppendUnsignedInt(g_current, pos, exponent < 0 ? -exponent : exponent);
+}
+
+void FormatPlain(bool negative, const int* digits, int digitCount, int exponent) {
+    int pos = 0;
+    g_current[0] = 0;
+
+    if (negative) {
+        AppendChar(g_current, pos, L'-');
+    }
+
+    if (exponent >= 0) {
+        const int wholeDigits = exponent + 1;
+        const int copiedDigits = digitCount < wholeDigits ? digitCount : wholeDigits;
+        AppendDigits(g_current, pos, digits, 0, copiedDigits);
+        for (int i = copiedDigits; i < wholeDigits; ++i) {
+            AppendChar(g_current, pos, L'0');
+        }
+        if (digitCount > wholeDigits) {
+            AppendChar(g_current, pos, L'.');
+            AppendDigits(g_current, pos, digits, wholeDigits, digitCount);
+        }
+        return;
+    }
+
+    AppendChar(g_current, pos, L'0');
+    AppendChar(g_current, pos, L'.');
+    for (int i = 0; i < -exponent - 1; ++i) {
+        AppendChar(g_current, pos, L'0');
+    }
+    AppendDigits(g_current, pos, digits, 0, digitCount);
+}
+
+void FormatNumber(double value) {
+    if (!IsFiniteValue(value)) {
+        SetError();
+        return;
+    }
+
+    if (value == 0) {
+        CopyText(L"0");
         return;
     }
 
     const bool negative = value < 0;
-    const int magnitude = negative ? -value : value;
-    const int whole = magnitude / Scale;
-    const int fraction = magnitude % Scale;
+    double magnitude = AbsValue(value);
+    int exponent = 0;
 
-    if (fraction == 0) {
-        wsprintfW(g_current, negative ? L"-%d" : L"%d", whole);
-        return;
+    while (magnitude >= 10) {
+        magnitude /= 10;
+        ++exponent;
+    }
+    while (magnitude < 1) {
+        magnitude *= 10;
+        --exponent;
     }
 
-    wsprintfW(g_current, negative ? L"-%d.%04d" : L"%d.%04d", whole, fraction);
-    TrimFractionZeros();
+    int digits[DisplaySignificantDigits + 1];
+    for (int i = 0; i <= DisplaySignificantDigits; ++i) {
+        int digit = static_cast<int>(magnitude);
+        if (digit < 0) {
+            digit = 0;
+        }
+        if (digit > 9) {
+            digit = 9;
+        }
+        digits[i] = digit;
+        magnitude = (magnitude - digit) * 10;
+    }
+
+    if (digits[DisplaySignificantDigits] >= 5) {
+        for (int i = DisplaySignificantDigits - 1; i >= 0; --i) {
+            ++digits[i];
+            if (digits[i] < 10) {
+                break;
+            }
+            digits[i] = 0;
+            if (i == 0) {
+                digits[0] = 1;
+                ++exponent;
+                break;
+            }
+        }
+    }
+
+    int digitCount = DisplaySignificantDigits;
+    while (digitCount > 1 && digits[digitCount - 1] == 0) {
+        --digitCount;
+    }
+
+    if (exponent >= ScientificLargeExponent || exponent <= ScientificSmallExponent) {
+        FormatScientific(negative, digits, digitCount, exponent);
+    } else {
+        FormatPlain(negative, digits, digitCount, exponent);
+        TrimFractionZeros();
+    }
 }
 
 void ClearCalculator() {
     CopyText(L"0");
     g_stored = 0;
     g_pendingOp = 0;
+    g_lastOperand = 0;
+    g_lastOp = 0;
     g_startNewNumber = true;
+    g_hasLastOperation = false;
+    g_error = false;
     UpdateDisplay();
 }
 
@@ -161,6 +300,8 @@ void AppendInput(wchar_t ch) {
 
 void InputDigit(wchar_t digit) {
     if (g_startNewNumber) {
+        g_error = false;
+        g_hasLastOperation = false;
         if (digit == L'.') {
             CopyText(L"0.");
         } else {
@@ -185,59 +326,113 @@ void InputDigit(wchar_t digit) {
     UpdateDisplay();
 }
 
-bool ApplyPendingOperation(int rhs) {
-    switch (g_pendingOp) {
+bool ApplyOperation(wchar_t op, double rhs) {
+    double result = 0;
+
+    switch (op) {
     case L'+':
-        g_stored = ClampValue(static_cast<long long>(g_stored) + rhs);
-        return true;
+        result = g_stored + rhs;
+        break;
     case L'-':
-        g_stored = ClampValue(static_cast<long long>(g_stored) - rhs);
-        return true;
+        result = g_stored - rhs;
+        break;
     case L'*':
-        g_stored = ClampValue((static_cast<long long>(g_stored) * rhs) / Scale);
-        return true;
+        result = g_stored * rhs;
+        break;
     case L'/':
         if (rhs == 0) {
-            CopyText(L"Cannot divide by zero");
-            g_pendingOp = 0;
-            g_startNewNumber = true;
-            UpdateDisplay();
             return false;
         }
-        g_stored = ClampValue((static_cast<long long>(g_stored) * Scale) / rhs);
-        return true;
+        result = g_stored / rhs;
+        break;
     default:
-        g_stored = rhs;
-        return true;
+        result = rhs;
+        break;
     }
+
+    if (!IsFiniteValue(result)) {
+        return false;
+    }
+
+    g_stored = result;
+    return true;
 }
 
 void InputOperator(wchar_t op) {
+    if (g_error) {
+        return;
+    }
+
     if (!g_startNewNumber) {
-        if (!ApplyPendingOperation(CurrentValue())) {
+        double current = 0;
+        if (!TryCurrentValue(current)) {
+            SetError();
+            return;
+        }
+        if (!ApplyOperation(g_pendingOp, current)) {
+            SetError();
             return;
         }
         FormatNumber(g_stored);
         UpdateDisplay();
-    } else {
-        g_stored = CurrentValue();
     }
 
     g_pendingOp = op;
     g_startNewNumber = true;
+    g_hasLastOperation = false;
 }
 
 void CalculateResult() {
-    if (g_pendingOp == 0) {
+    if (g_error) {
         return;
     }
 
-    if (ApplyPendingOperation(CurrentValue())) {
+    if (g_pendingOp == 0) {
+        if (!g_hasLastOperation) {
+            return;
+        }
+
+        double current = g_stored;
+        if (!g_startNewNumber) {
+            if (!TryCurrentValue(current)) {
+                SetError();
+                return;
+            }
+        }
+
+        g_stored = current;
+        if (!ApplyOperation(g_lastOp, g_lastOperand)) {
+            SetError();
+            return;
+        }
         FormatNumber(g_stored);
-        g_pendingOp = 0;
         g_startNewNumber = true;
         UpdateDisplay();
+        return;
     }
+
+    double current = g_stored;
+    if (!g_startNewNumber) {
+        if (!TryCurrentValue(current)) {
+            SetError();
+            return;
+        }
+    }
+
+    const wchar_t completedOp = g_pendingOp;
+    const double completedOperand = g_startNewNumber ? g_stored : current;
+    if (!ApplyOperation(completedOp, completedOperand)) {
+        SetError();
+        return;
+    }
+
+    FormatNumber(g_stored);
+    g_pendingOp = 0;
+    g_lastOp = completedOp;
+    g_lastOperand = completedOperand;
+    g_hasLastOperation = true;
+    g_startNewNumber = true;
+    UpdateDisplay();
 }
 
 void CreateButton(HWND parent, const wchar_t* text, int id, int x, int y, int width, int height) {
@@ -271,7 +466,22 @@ void CreateControls(HWND hwnd) {
         GetModuleHandleW(nullptr),
         nullptr);
 
-    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    g_displayFont = CreateFontW(
+        24,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        DEFAULT_PITCH | FF_SWISS,
+        L"Segoe UI");
+    HFONT font = g_displayFont ? g_displayFont : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     SendMessageW(g_display, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
     struct Button {
@@ -363,6 +573,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         return 0;
     case WM_DESTROY:
+        if (g_displayFont) {
+            DeleteObject(g_displayFont);
+            g_displayFont = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     default:

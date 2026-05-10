@@ -47,11 +47,11 @@ The exact size can change if the emitter changes.
 - Single section: `.text`, containing code, mutable data, strings, and imports.
 - Imports:
   - `kernel32.dll`: `ExitProcess`, `GetModuleHandleW`
-  - `user32.dll`: window creation, message loop, controls, `wsprintfW`
-  - `gdi32.dll`: `GetStockObject`
+  - `user32.dll`: window creation, message loop, controls, display text updates
+  - `gdi32.dll`: `CreateFontW`, `DeleteObject`, `GetStockObject`
 
 The program creates a classic Win32 window titled `Calculator`, a read-only edit
-display, and 17 button controls.
+display with a Segoe UI font, and 17 button controls.
 
 ## Behavioral coverage currently represented
 
@@ -61,9 +61,10 @@ The emitter mirrors the C++ calculator behavior:
 - clear
 - `+`, `-`, `*`, `/`
 - equals
-- fixed-point arithmetic using scale `10000`
-- divide-by-zero message
-- overflow clamping behavior
+- double-style parsing and arithmetic
+- repeat-equals state
+- `ERROR` state for invalid operations such as divide-by-zero
+- plain and scientific formatting with 12 significant digits
 
 ## Suggested future iteration workflow
 

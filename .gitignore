@@ -4,3 +4,4 @@ build/
 *.ilk
 *.user
 .vs/
+out/**
