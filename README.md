@@ -1,6 +1,6 @@
-# Win32 Calculator
+# Win32 Calculator built by GPT 5.5
 
-A minimal native Windows calculator written in C++ with the Win32 API.
+A minimal native Windows calculator written in C++ with the Win32 API built using GPT 5.5 inference, with out using a compiler or linker.
 
 ## Current build path
 
