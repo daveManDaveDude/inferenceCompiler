@@ -15,6 +15,34 @@ That writes `build\Win32Calculator.exe` directly as a PE32 GUI executable.
 The Python script emits the PE headers, import table, UTF-16 data, and
 hand-encoded x86 instructions.
 
+## Suggested inference rebuild prompt
+
+Use this prompt if you want an inference-based coding agent to reconstruct the
+direct executable build path from the repository, even if
+`tools\emit_win32_calculator.py` is not present:
+
+```text
+Rebuild this repository into a working native Windows calculator executable
+without using any C/C++ compiler, assembler, linker, CMake, MSBuild, Visual
+Studio, MinGW, NASM, SDK build tools, external libraries, or package
+dependencies.
+
+Treat src/main.cpp as the behavioral reference, but do not compile it. Create
+or update tools/emit_win32_calculator.py so it writes build/Win32Calculator.exe
+directly as a PE32 x86 Windows GUI executable. Keep the executable layout
+explicit in that script: PE headers, section table, RVAs, imports, UTF-16
+strings, data layout, and x86 instruction bytes should be emitted manually.
+Small local helpers are fine when they keep byte emission readable, but do not
+introduce a general-purpose assembler, linker, or linker-like abstraction.
+
+The generated EXE should create a classic Win32 calculator window with a display
+and buttons, support the behavior described by src/main.cpp, and produce a
+working binary at build/Win32Calculator.exe. After generating the file, validate
+the PE structure and smoke test the GUI by launching the EXE, clicking 9 * 9 =,
+and confirming the display reads 81. Close or kill the launched process after
+testing.
+```
+
 ## Calculator behavior
 
 - Arithmetic supports large floating-point values up to roughly `1e308`.
